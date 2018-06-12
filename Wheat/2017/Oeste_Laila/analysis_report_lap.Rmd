@@ -1,0 +1,256 @@
+---
+output:
+  html_document:
+    number_sections: yes
+    theme: spacelab
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+geometry: margin=1in
+---
+title: "Analisis Oeste 25 GH Trigo"
+
+```{r, echo=FALSE,results='hide'}
+#source('~/Box Sync/R_libraries_load/library.R')
+library(tmap)
+library(rgdal)
+library(Grid2Polygons)
+library(plm)
+library(stargazer)
+library(tidyverse)
+library(data.table)
+library(sf)
+#opts_chunk$set(
+ # comment = NA,
+  #message = FALSE,
+  #warning = FALSE,
+  #echo=FALSE,
+  #tidy=FALSE,
+  #size='footnotesize'
+  #)
+#opts_knit$set(root.dir='~/Box Sync/ResearchProjects/DIFM')
+setwd("C:/Users/lapuntel/Dropbox/Clarion/Ensayos DIFM/Ensayos_2017_Trigo/Grobocopatel/Oeste_Laila")
+```
+
+```{r,cache=TRUE}
+#===================================
+# Preparation
+#===================================
+#--- import the data ---#
+#data <- fread('./Data/Oeste_Laila_17/Oeste25.csv') %>% 
+#	setnames(names(.),tolower(names(.)))
+
+data <- fread('./Oeste25.csv') %>% 
+	setnames(names(.),tolower(names(.)))
+
+```
+
+# Visualization of the data
+
+```{r, cache=TRUE}
+ggplot(data=data) +
+	geom_point(aes(y=lat,x=long,color=yld_mass_d))
+```
+
+# Regression
+
+```{r, cache=TRUE}
+
+library(mgcv)
+gam_res <- gam(yld_mass_d ~
+	s(rate,k=5)+
+	s(ec90,k=5)+
+	I(rate*ec90)+
+	s(long,k=10)+
+	s(lat,k=10)+
+	ti(long,lat,k=10),
+	data=data) 
+summary(gam_res)
+plot(gam_res)
+```
+
+# Visualization of the results
+
+```{r}
+#--- list of N rate values ---#
+rate_ls <- seq(min(data$rate),max(data$rate),length=1000)
+
+#--- list of values of EC we consider ---#
+ec_ls <- quantile(data[,ec90],prob=c(0.05,0.5,0.95))
+```
+
+```{r }
+#--- new data for prediction ---#
+data_new <- expand.grid(rate_ls,ec_ls) %>% 
+	data.table() %>% 
+	setnames(names(.),c('rate','ec90')) %>% 
+	.[,long:=data[,mean(long)]] %>% 
+	.[,lat:=data[,mean(lat)]]  
+
+#--- yhat and se ---#
+yhat <- predict(gam_res,newdata=data_new,se.fit=TRUE)
+```
+
+```{r }
+#--- Calculate profit and se ---#
+data_plot <- data_new %>%  
+	.[,y_hat:=yhat$fit] %>% 
+	.[,y_hat_se:=yhat$se.fit]  
+```
+
+## Yield response to nitrogen rate for various levels of EC (deep) 
+
+```{r, cache=TRUE}
+ggplot() +
+	geom_line(data=data_plot,aes(y=y_hat,x=rate,color=factor(ec90)))
+
+```
+
+# Profit maximizing nitrogen rate
+
+```{r, cache=TRUE}
+Pn <- 0.35 # $/kg
+Pw <- 160 # $/ton
+rate_ls <- seq(0,400,length=1000)
+ec_ls <- seq(min(data$ec90),max(data$ec90),length=100)
+pi_data <- expand.grid(rate_ls,ec_ls) %>% 
+	data.table() %>% 
+	setnames(names(.),c('rate','ec90')) %>% 
+	.[,long:=data[,mean(long)]] %>% 
+	.[,lat:=data[,mean(lat)]] %>% 
+	.[,yhat:=predict(gam_res,newdata=.)] %>% 
+	.[,pi_hat:=Pw*yhat-Pn*rate] %>% 
+	.[,.SD[which.max(pi_hat),],by=ec90]  
+
+gam_opt_N <- gam(rate ~ s(ec90,k=4),data=pi_data)
+# plot(gam_opt_N)
+```
+
+```{r, cache=TRUE}
+ggplot(data=pi_data) +	
+	geom_line(aes(y=rate,x=ec90)) +
+	xlab('EC 90 (ds/m)') +
+	ylab('Dosis Optima de Urea (kg/ha)') +
+	ggtitle('El Impacto de la EC90 en la dosis optima de urea')
+```
+
+```{r, cache=TRUE}
+mean_long <- data[,mean(long)]
+mean_lat <- data[,mean(lat)]
+
+#veris <- st_read(dsn='~/Box Sync/ResearchProjects/DIFM/Data/Oeste_Laila_17/Laila_Oeste_additional','Veris') %>% 
+veris<- st_read(dsn= "Additional/Veris.shp" ) %>%
+	setnames(names(.),tolower(names(.))) %>% 
+	filter(ec90<max(data$ec90))
+
+farmer_pi <- veris %>% 
+	mutate(
+		rate=180,
+		long=mean_long,
+		lat=mean_lat
+		) %>% 
+	mutate(
+		yhat_f=predict(gam_res,newdata=.),
+		pi_hat_f=Pw*yhat_f-Pn*rate
+		)
+
+opt_pi <- veris %>% 
+	mutate(
+		rate=predict(gam_opt_N,newdata=.),
+		long=mean_long,
+		lat=mean_lat
+		) %>% 
+	mutate(
+		yhat_o=predict(gam_res,newdata=.),
+		pi_hat_o=Pw*yhat_o-Pn*rate
+		)
+
+all_pi <- cbind(farmer_pi,opt_pi) %>% 
+	mutate(pi_dif=pi_hat_o-pi_hat_f)  
+mean(all_pi$pi_dif)
+min(all_pi$pi_dif)
+max(all_pi$pi_dif)
+
+  all_pi %>%
+  ggplot( aes(x=pi_dif) )+ #, fill=region)
+  geom_density() #+xlim(0,100)
+```
+
+## Profit differentials between farmer-chosen and recommended rates by EC
+
+Loss mostly come from not applying enough nitrogen at parts of the field with high EC.
+
+```{r, cache=TRUE}
+ggplot(data=all_pi) +
+	geom_line(aes(y=pi_dif,x=ec90)) +
+	xlab('EC 90') +
+	ylab('Diferencia en margen ($/ha)') +
+	ggtitle('Diferencia en margen entre dosis fija y optima en diferente EC 90')
+
+ggplot(data=all_pi) +
+	geom_histogram(aes(x=ec90),fill='white',color='blue') +
+	xlab('EC 90') +
+	ggtitle('Distribucion de EC (90)')
+```
+
+# Optimal seed rate map
+
+## Optimal variable rate map
+
+```{r opt_map, cache=TRUE,fig.width=6,fig.height=6}
+ec_poly <- readGDAL('./Oe_25_ECclip1.tif') %>% 
+	as(.,'SpatialPolygonsDataFrame') %>% 
+	st_as_sf() %>% 
+	setnames('band1','ec90') %>% 
+	mutate(opt_N=predict(gam_opt_N,newdata=.)) %>% 
+	filter(ec90<max(data$ec90))
+```
+
+```{r, cache=TRUE,dependson='opt_map'}
+tm_shape(ec_poly) +
+	tm_fill('opt_N') +
+	tm_layout(
+        legend.outside=TRUE
+        )	
+# how their application fairs against the optimal one
+# optimal uniform rate 
+```
+
+## Optimal uniform Urea rate
+
+```{r, cache=TRUE}
+n_ls <- 230:280
+data_pi <- ec_poly %>% 
+	data.table() %>% 
+	.[rep(1:nrow(ec_poly),each=length(n_ls)),] %>% 
+	.[,rate:=rep(n_ls,nrow(ec_poly))] %>% 
+	.[,long:=data[,mean(long)]] %>% 
+	.[,lat:=data[,mean(lat)]] %>% 
+	.[,yhat:=predict(gam_res,newdata=.)] %>% 
+	.[,pi_hat:=Pw*yhat-Pn*rate] 
+
+opt_N_unif <- data_pi[,.(pi_hat=mean(pi_hat)),by=rate] %>% 
+	.[,.SD[which.max(pi_hat),]]
+
+opt_N_unif$rate
+```
+
+## Optimal uniform vs variable?
+
+```{r, cache=TRUE}
+all_pi %<>%  data.table(.) %>% 
+	.[,rate:=opt_N_unif$rate] %>% 
+	.[,yhat_opt_u:=predict(gam_res,newdata=.)] %>% 
+	.[,pi_opt_u:=Pw*yhat_opt_u-Pn*rate]  
+```
+
+The average difference in profitability between the variable and uniform rates is:
+
+```{r, cache=TRUE}
+#all_pi %$% mean(pi_hat_o-pi_opt_u)
+```
+
+
